@@ -1,0 +1,10 @@
+ToolUniverse/
+.env
+outputs/
+*.json
+*.jsonl
+__pycache__/
+*.pyc
+*.csv
+.python-version
+src/brief.py
