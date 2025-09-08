@@ -44,9 +44,13 @@ SYS = (
     "  CALL <tool_name> <json-args>\n"
     "  (no extra text on that line)\n"
     "  Preferred tools: FDA_get_drug_interactions_by_drug_name, FDA_get_contraindications_by_drug_name, FDA_get_pregnancy_effects_info_by_drug_name.\n"
+    "- Route tools by question type:\n"
+    "  * interactions/병용 → FDA_get_drug_interactions_by_drug_name\n"
+    "  * contraindications/금기 → FDA_get_contraindications_by_drug_name\n"
+    "  * pregnancy/임신 → FDA_get_pregnancy_effects_info_by_drug_name\n"
+    "  * breastfeeding/수유 → FDA_get_pregnancy_or_breastfeeding_info_by_drug_name\n"
+    "  * warnings/주의/위험 → FDA_get_risk_info_by_drug_name\n"
     "- Otherwise provide a brief justification (no step-by-step chain-of-thought) and a final multiple-choice letter.\n"
-    "- You MUST perform at least one tool call before giving the final answer.\n"
-
 )
 
 def _ask(messages, model="gpt-4o-mini", temperature=0.2):
@@ -117,11 +121,26 @@ def adapt_args(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
 
     return args
 
+def suggest_tool_by_question(q: str) -> str | None:
+    s = (q or "").lower()
+    if any(k in s for k in ["interact", "상호작용", "병용"]):
+        return "FDA_get_drug_interactions_by_drug_name"
+    if any(k in s for k in ["contraindication", "금기"]):
+        return "FDA_get_contraindications_by_drug_name"
+    if any(k in s for k in ["pregnan", "임신"]):
+        return "FDA_get_pregnancy_effects_info_by_drug_name"
+    if any(k in s for k in ["breastfeed", "수유", "lactation", "lactat"]):
+        return "FDA_get_pregnancy_or_breastfeeding_info_by_drug_name"
+    if any(k in s for k in ["warning", "주의", "위험", "risk"]):
+        return "FDA_get_risk_info_by_drug_name"
+    return None
+
 def run_agent(question: str, options: Dict[str, str], max_rounds=4, model="gpt-4o-mini"):
     messages = [
         {"role": "system", "content": SYS},
         {"role": "user", "content": f"Question:\n{question}\n\nOptions:\n{json.dumps(options, ensure_ascii=False)}"}
     ]
+    suggested = suggest_tool_by_question(question)
     trace: List[Dict[str, Any]] = []
 
     for _ in range(max_rounds):
@@ -147,9 +166,13 @@ def run_agent(question: str, options: Dict[str, str], max_rounds=4, model="gpt-4
             messages.append({"role": "assistant", "content": out})
             messages.append({"role": "user", "content": f"[{canon} RESULT]\n{json.dumps(result, ensure_ascii=False)}\nUse it."})
             # small nudge if tool failed
-            if isinstance(result, dict) and result.get("error"):
-                messages.append({"role": "user", "content": "Tool output unavailable. Proceed using clinical knowledge and choose the final letter."})
+            # if isinstance(result, dict) and result.get("error"):
+            #     messages.append({"role": "user", "content": "Tool output unavailable. Proceed using clinical knowledge and choose the final letter."})
             continue
+
+        # If the model didn't call a tool yet, gently nudge with a suggested tool based on the question
+        if not trace and suggested:
+            messages.append({"role": "user", "content": f"Suggestion: call {suggested} with JSON args, e.g., {{\"drug_name\": \"<drug>\"}}. Then decide the final letter."})
 
         # LLM이 최종 답/요약을 냈다고 판단
         messages.append({"role": "assistant", "content": out})
@@ -164,4 +187,4 @@ def run_agent(question: str, options: Dict[str, str], max_rounds=4, model="gpt-4
         forced = _ask(messages, model=model, temperature=0).strip()[:1]
         return {"final_choice": forced or "", "rationale": out, "tools": trace}
 
-    return {"final_choice": "D", "rationale": "max_rounds_reached", "tools": trace}
+    return {"final_choice": "", "rationale": "max_rounds_reached", "tools": trace}
