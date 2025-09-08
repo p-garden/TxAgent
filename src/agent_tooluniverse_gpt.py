@@ -44,6 +44,8 @@ SYS = (
     "  CALL <tool_name> <json-args>\n"
     "  (no extra text on that line)\n"
     "  Preferred tools: FDA_get_drug_interactions_by_drug_name, FDA_get_contraindications_by_drug_name, FDA_get_pregnancy_effects_info_by_drug_name.\n"
+    "- If a tool accepts a single `drug_name` but you must compare multiple options, call the tool MULTIPLE times (one per option) and clearly tie each call/result to an option letter.\n"
+    "- Your reply must end with a line exactly of the form: `Final answer: X` where X is one of A/B/C/D.\n"
     "- Route tools by question type:\n"
     "  * interactions/병용 → FDA_get_drug_interactions_by_drug_name\n"
     "  * contraindications/금기 → FDA_get_contraindications_by_drug_name\n"
@@ -103,6 +105,11 @@ def adapt_args(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                 return {"drug_name": a[alias]}
         if "medications" in a and isinstance(a["medications"], list) and a["medications"]:
             return {"drug_name": str(a["medications"][0])}
+        # support plural/list inputs
+        if "drug_names" in a and isinstance(a["drug_names"], list) and a["drug_names"]:
+            return {"drug_name": str(a["drug_names"][0])}
+        if "drugs" in a and isinstance(a["drugs"], list) and a["drugs"]:
+            return {"drug_name": str(a["drugs"][0])}
         if "drug1" in a:
             return {"drug_name": str(a["drug1"])}
         if a:
@@ -135,7 +142,7 @@ def suggest_tool_by_question(q: str) -> str | None:
         return "FDA_get_risk_info_by_drug_name"
     return None
 
-def run_agent(question: str, options: Dict[str, str], max_rounds=4, model="gpt-4o-mini"):
+def run_agent(question: str, options: Dict[str, str], max_rounds=6, model="gpt-4o-mini"):
     messages = [
         {"role": "system", "content": SYS},
         {"role": "user", "content": f"Question:\n{question}\n\nOptions:\n{json.dumps(options, ensure_ascii=False)}"}
@@ -172,19 +179,31 @@ def run_agent(question: str, options: Dict[str, str], max_rounds=4, model="gpt-4
 
         # If the model didn't call a tool yet, gently nudge with a suggested tool based on the question
         if not trace and suggested:
-            messages.append({"role": "user", "content": f"Suggestion: call {suggested} with JSON args, e.g., {{\"drug_name\": \"<drug>\"}}. Then decide the final letter."})
+            # Provide a concrete hint to call per-option if needed
+            examples = []
+            for k, v in list(options.items())[:2]:
+                # include up to two example options as potential drug names
+                examples.append(f'CALL {suggested} {{"drug_name": "{v.split(";")[0].split(",")[0]}"}}')
+            hint = "\n".join(examples) if examples else f'CALL {suggested} {{"drug_name": "<option drug>"}}'
+            messages.append({"role": "user", "content": f"Suggestion: If the tool expects a single drug_name, call it multiple times (one per option). Examples:\n{hint}\nThen decide the final letter and end with: Final answer: X"})
 
         # LLM이 최종 답/요약을 냈다고 판단
         messages.append({"role": "assistant", "content": out})
 
-        # 마지막에 선택지 문자만 강제 추출
-        m = re.findall(r"\b([A-Z])\b", out)
+        # Prefer explicit 'Final answer: X' pattern
+        m = re.findall(r"Final answer:\s*([A-D])\b", out, flags=re.I)
         if m:
-            return {"final_choice": m[-1], "rationale": out, "tools": trace}
+            return {"final_choice": m[-1].upper(), "rationale": out, "tools": trace}
+        # Fallback: any standalone capital letter A-D
+        m2 = re.findall(r"\b([A-D])\b", out)
+        if m2:
+            return {"final_choice": m2[-1], "rationale": out, "tools": trace}
 
         # 한 글자 강제 요구
-        messages.append({"role": "user", "content": "Based on the tool results above, output ONLY the final choice letter (A/B/C/D). No explanation, no reasoning, no additional text."})
-        forced = _ask(messages, model=model, temperature=0).strip()[:1]
-        return {"final_choice": forced or "", "rationale": out, "tools": trace}
+        messages.append({"role": "user", "content": "Based on the tool results above, output EXACTLY one line in the format: Final answer: X  (where X is A/B/C/D). No other text."})
+        forced_out = _ask(messages, model=model, temperature=0).strip()
+        m = re.findall(r"Final answer:\s*([A-D])\b", forced_out, flags=re.I)
+        letter = (m[-1].upper() if m else (forced_out[:1] if forced_out[:1] in "ABCD" else ""))
+        return {"final_choice": letter, "rationale": out, "tools": trace}
 
     return {"final_choice": "", "rationale": "max_rounds_reached", "tools": trace}
